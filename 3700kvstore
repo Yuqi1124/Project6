@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+
+import sys, socket, time, json, random, hashlib
+from select import select
+
+# HALF of threshold of keepalive heartbeat
+TH_OF_HEARTBEAT = 1
+
+# Your ID number
+myId = sys.argv[1]
+# The ID numbers of all the other replicas
+replicaIds = sys.argv[2:]
+
+#init global vars
+leaderId='FFFF'
+sending_list=[]
+recieve_list=[]
+currentTerm=0
+voteFor=0
+log=[]
+commitIndex=0
+lastApplied=0
+
+#State machine :
+# 'role':leader, folooer, canidator
+# 'failcount':0    to check the response from a replica, stop retry  when over the threshold
+# 'last_heartbeat':last  time() value,last time SENDing message to the replica
+# 'state': alive , dead
+# nextIndex:[]
+# matchIndex:[]
+stateMachine={}
+
+message_list={}
+heartbeat=time.time()
+
+def generateMID(randomlength=16):
+  tmpstr = ''
+  baseStr = 'ABCDEFGHIGKLMNOPQRSTUVWXYZabcdefghigklmnopqrstuvwxyz0123456789'
+  length = len(baseStr) - 1
+  for i in range(randomlength):
+      tmpstr += baseStr[random.randint(0, length)]
+  return tmpstr
+
+def isleader():
+    global leaderId,myId
+    return leaderId==myId
+
+
+#As a follower check keepalive from leader, or update heartbeat
+def heartbeating(once=False):
+    global heartbeat,stateMachine,leaderId,TH_OF_HEARTBEAT
+    if once:
+        heartbeat=time.time()
+    else:
+        if time.time()-heartbeat > TH_OF_HEARTBEAT * 2:
+            return False
+    return True
+
+
+def keepalive():
+    global sending_list,heartbeat,stateMachine,leaderId,TH_OF_HEARTBEAT,last,currentTerm,commitIndex
+    for replica in stateMachine:
+        if replica!=myId:
+            msg = {
+                   'src': myId,
+                   'dst': replica,
+                   'leader': leaderId,
+                   'type': 'keepalive',
+                   'term': currentTerm,
+                   'commit': commitIndex,
+                   'MID':generateMID()
+                   }
+            send(msg)
+            time.sleep(0.1)
+            stateMachine[replica]['last_heartbeat']=last
+
+def send(msg):
+    global  last
+    last=time.time()
+    sock.send(json.dumps(msg).encode())
+    time.sleep(0.05)
+
+
+# Connect to the network. All messages to/from other replicas and clients will
+# occur over this socket
+try:
+    # sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM,0)
+    sock.connect(myId)
+except:
+    print('Socket connect fail! Quit!')
+    exit(0)
+
+last = time.time()
+if myId < min(replicaIds):
+    leaderId=myId
+    stateMachine[myId]={'role':'leader','last_heartbeat':last,'state':'alive','failcount':0,'nextIndex':[],'matchIndex':[]}
+else:
+    leaderId=min(replicaIds)
+    stateMachine[myId]={'role':'follower','last_heartbeat':last,'state':'alive','failcount':0,'nextIndex':[],'matchIndex':[]}
+
+for replica in replicaIds:
+    if leaderId==replica:
+        stateMachine[replica] = {'role': 'leader', 'last_heartbeat': last,'state':'alive','failcount':0,'nextIndex':[],'matchIndex':[]}
+    else:
+        stateMachine[replica] = {'role': 'follower', 'last_heartbeat': last,'state':'alive','failcount':0,'nextIndex':[],'matchIndex':[]}
+
+
+while True:
+    ready = select([sock], [], [], 0.1)[0]
+
+    if sock in ready:
+        try:
+            msg_raw = sock.recv(32768)
+        except:
+            msg_raw = b''
+
+        if len(msg_raw) == 0: continue
+        try:
+            msg = json.loads(msg_raw)
+        except:
+            msg = []
+
+        recieve_list.append(msg)
+        # For now, ignore get() and put() from clients
+
+        print(msg)
+        if commitIndex > lastApplied:
+            lastApplied = commitIndex
+
+
+
+        if msg['type'] == 'get':
+            print('Get %s from socket' % (msg['key']),msg)
+        elif msg['type'] == 'put':
+            print ('%s received a put from %s' % (msg['dst'], msg['src']),msg)
+            if isleader():
+                print('Handle message')
+            else:
+                msg = {'type': 'append_entries',
+                           'src': self.id,
+                           'dst': dst_id,
+                           'term': self.current_term,
+                           'leader_id': self.id,
+                           'prev_log_index': self.next_index[dst_id] - 1,
+                           'prev_log_term': self.log.get_log_term(self.next_index[dst_id] - 1),
+                           'entries': self.log.get_entries(self.next_index[dst_id]),
+                           'leader_commit': self.commit_index
+                           }
+                sending_list.append(msg)
+        elif msg['type'] == 'redirect':
+            print('Redirect:', msg)
+        elif msg['type'] == 'fail':
+            print('Response Fail:', msg)
+        elif msg['type'] == 'ok':
+            print('Response OK:', msg)
+        elif msg['type'] == 'keepalive':
+            heartbeating(True)
+            #print('Heart Beating:',msg)
+        # Handle noop messages. This may be removed from your final implementation
+        elif msg['type'] == 'noop':
+            print ('%s received a NOOP from %s' % (msg['dst'], msg['src']))
+
+    for sendmsg in sending_list:
+        try:
+            send(sendmsg)
+        except:
+            sending_list.remove(sendmsg)
+            print("\nSend message Error! \n    INFO: ",sendmsg)
+
+
+
+    if isleader():
+        keepalive()
+    else:
+        if not heartbeating():
+            # Send a no-op message to a random peer every two seconds, just for fun
+            # You definitely want to remove this from your implementation
+            msg = {'src': myId, 'dst': random.choice(replicaIds), 'leader': 'FFFF', 'type': 'noop'}
+            send(msg)
+            heartbeating(True)
+
